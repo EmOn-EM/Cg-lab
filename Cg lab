@@ -1,0 +1,204 @@
+#include <GL/glut.h>
+#include <math.h>
+#include <stdlib.h>
+#include <time.h>
+
+float carX[5] = {-1, -0.7, -0.3, 0.2, 0.6};
+float cloud[4] = {-0.9, -0.3, 0.2, 0.7};
+float birdX = -1.0;
+float personX = -0.8;
+
+bool rain = false;
+bool night = false;
+
+struct Rain {
+    float x;
+    float y;
+};
+
+Rain drop[300];
+float starX[100];
+float starY[100];
+
+// =============================================
+// WINDOW TO VIEWPORT CONVERSION
+// OpenGL uses [-1,1] coordinate range (viewport: 1000x700)
+// We convert NDC coords to pixel coords for raster algorithms,
+// then draw pixel-by-pixel using glVertex2f back in NDC
+// =============================================
+
+// NDC [-1,1] to pixel [0, windowW/H]
+void ndcToPixel(float nx, float ny, int &px, int &py) {
+    px = (int)((nx + 1.0f) * 0.5f * 1000);
+    py = (int)((ny + 1.0f) * 0.5f * 700);
+}
+
+// Pixel back to NDC
+void pixelToNDC(int px, int py, float &nx, float &ny) {
+    nx = (px / 500.0f) - 1.0f;
+    ny = (py / 350.0f) - 1.0f;
+}
+
+// Draw a single pixel in NDC space
+void drawPixel(int px, int py) {
+    float nx, ny;
+    pixelToNDC(px, py, nx, ny);
+    glBegin(GL_POINTS);
+    glVertex2f(nx, ny);
+    glEnd();
+}
+
+// =============================================
+// DDA LINE ALGORITHM
+// Used for: street light poles, tree trunks,
+//           bird wings, rain drops
+// =============================================
+void ddaLine(float x1, float y1, float x2, float y2) {
+    int px1, py1, px2, py2;
+    ndcToPixel(x1, y1, px1, py1);
+    ndcToPixel(x2, y2, px2, py2);
+
+    int dx = px2 - px1;
+    int dy = py2 - py1;
+    int steps = abs(dx) > abs(dy) ? abs(dx) : abs(dy);
+
+    if (steps == 0) {
+        drawPixel(px1, py1);
+        return;
+    }
+
+    float xInc = dx / (float)steps;
+    float yInc = dy / (float)steps;
+
+    float x = px1;
+    float y = py1;
+
+    for (int i = 0; i <= steps; i++) {
+        drawPixel((int)round(x), (int)round(y));
+        x += xInc;
+        y += yInc;
+    }
+}
+
+// =============================================
+// BRESENHAM'S LINE ALGORITHM
+// Used for: road dashes, zebra crossing lines,
+//           building window frames, car outlines
+// =============================================
+void bresenhamLine(float x1, float y1, float x2, float y2) {
+    int px1, py1, px2, py2;
+    ndcToPixel(x1, y1, px1, py1);
+    ndcToPixel(x2, y2, px2, py2);
+
+    int dx = abs(px2 - px1);
+    int dy = abs(py2 - py1);
+    int sx = (px1 < px2) ? 1 : -1;
+    int sy = (py1 < py2) ? 1 : -1;
+    int err = dx - dy;
+
+    int x = px1, y = py1;
+
+    while (true) {
+        drawPixel(x, y);
+        if (x == px2 && y == py2) break;
+        int e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; x += sx; }
+        if (e2 <  dx) { err += dx; y += sy; }
+    }
+}
+
+// =============================================
+// MIDPOINT CIRCLE DRAWING ALGORITHM
+// Used for: wheels, lights, sun/moon,
+//           tree foliage circles, cloud circles
+// =============================================
+void midpointCircle(float cx, float cy, float r) {
+    int pcx, pcy;
+    ndcToPixel(cx, cy, pcx, pcy);
+
+    // Convert radius from NDC to pixels (use x-axis scale: 500 pixels per unit)
+    int pr = (int)(r * 500);
+    if (pr <= 0) pr = 1;
+
+    int x = 0;
+    int y = pr;
+    int d = 1 - pr;
+
+    // Lambda-style helper to plot all 8 octants
+    auto plot8 = [&](int ox, int oy) {
+        drawPixel(pcx + ox, pcy + oy);
+        drawPixel(pcx - ox, pcy + oy);
+        drawPixel(pcx + ox, pcy - oy);
+        drawPixel(pcx - ox, pcy - oy);
+        drawPixel(pcx + oy, pcy + ox);
+        drawPixel(pcx - oy, pcy + ox);
+        drawPixel(pcx + oy, pcy - ox);
+        drawPixel(pcx - oy, pcy - ox);
+    };
+
+    plot8(x, y);
+
+    while (x < y) {
+        x++;
+        if (d < 0) {
+            d += 2 * x + 1;
+        } else {
+            y--;
+            d += 2 * (x - y) + 1;
+        }
+        plot8(x, y);
+    }
+}
+
+// =============================================
+// FILLED CIRCLE (used for large solid areas like
+// sun body, cloud puffs, leaf clusters)
+// Uses midpoint circle scanline fill
+// =============================================
+void midpointCircleFilled(float cx, float cy, float r) {
+    int pcx, pcy;
+    ndcToPixel(cx, cy, pcx, pcy);
+    int pr = (int)(r * 500);
+    if (pr <= 0) { drawPixel(pcx, pcy); return; }
+
+    int x = 0, y = pr;
+    int d = 1 - pr;
+
+    auto hline = [&](int x0, int x1, int py) {
+        for (int i = x0; i <= x1; i++) drawPixel(i, py);
+    };
+
+    hline(pcx - y, pcx + y, pcy);
+
+    while (x < y) {
+        x++;
+        if (d < 0) {
+            d += 2 * x + 1;
+        } else {
+            y--;
+            d += 2 * (x - y) + 1;
+        }
+        hline(pcx - x, pcx + x, pcy + y);
+        hline(pcx - x, pcx + x, pcy - y);
+        hline(pcx - y, pcx + y, pcy + x);
+        hline(pcx - y, pcx + y, pcy - x);
+    }
+}
+
+
+
+// =============================================
+// MAIN
+// =============================================
+int main(int argc, char **argv) {
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB);
+    glutInitWindowSize(1000, 700);
+    glutCreateWindow("Smart Primary School Environment");
+    init();
+    glutDisplayFunc(display);
+    glutKeyboardFunc(keyboard);
+    glutTimerFunc(16, update, 0);
+    glutMainLoop();
+    return 0;
+}
